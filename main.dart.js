@@ -32824,6 +32824,7 @@ var $async$b2D=A.B(function(a,b){if(a===1)return A.C(b,r)
 while(true)switch(s){case 0:switch(2){case 2:break}s=2
 return A.N(A.b0k(B.Tr),$async$b2D)
 case 2:q=b
+v.G.removeSplashFromWeb()
 if($.an==null)A.b6x()
 p=$.an
 A.bxO(p.aJy(new A.H1(!0,new A.b2G(q),B.aeg,null)),p,"runApp")
