@@ -17,10 +17,13 @@ class AppBloc extends Bloc<AppEvent, AppState> {
     required HtAuthRepository authenticationRepository,
     required HtDataRepository<UserAppSettings> userAppSettingsRepository,
     required HtDataRepository<AppConfig> appConfigRepository,
+    required HtDataRepository<UserContentPreferences>
+    userContentPreferencesRepository, // Added
     required local_config.AppEnvironment environment, // Added
   }) : _authenticationRepository = authenticationRepository,
        _userAppSettingsRepository = userAppSettingsRepository,
        _appConfigRepository = appConfigRepository,
+       _userContentPreferencesRepository = userContentPreferencesRepository, // Added
        super(
          AppState(
            settings: const UserAppSettings(id: 'default'),
@@ -48,6 +51,8 @@ class AppBloc extends Bloc<AppEvent, AppState> {
   final HtAuthRepository _authenticationRepository;
   final HtDataRepository<UserAppSettings> _userAppSettingsRepository;
   final HtDataRepository<AppConfig> _appConfigRepository; // Added
+  final HtDataRepository<UserContentPreferences>
+  _userContentPreferencesRepository; // Added
   late final StreamSubscription<User?> _userSubscription;
 
   /// Handles user changes and loads initial settings once user is available.
@@ -55,20 +60,38 @@ class AppBloc extends Bloc<AppEvent, AppState> {
     AppUserChanged event,
     Emitter<AppState> emit,
   ) async {
-    // Determine the AppStatus based on the user object and its role
-    final AppStatus status;
+    // Capture the previous user's ID before updating the state.
+    final String? oldUserId = state.user?.id;
+    final AppStatus oldStatus = state.status;
+
+    // Determine the AppStatus based on the new user object and its role.
+    final AppStatus newStatus;
     switch (event.user?.role) {
       case null: // User is null (unauthenticated)
-        status = AppStatus.unauthenticated;
+        newStatus = AppStatus.unauthenticated;
       case UserRole.standardUser:
-        status = AppStatus.authenticated;
+        newStatus = AppStatus.authenticated;
       // ignore: no_default_cases
       default:
-        status = AppStatus.anonymous;
+        newStatus = AppStatus.anonymous;
     }
 
-    // Emit user and status update first
-    emit(state.copyWith(status: status, user: event.user));
+    // Emit user and status update first.
+    emit(state.copyWith(status: newStatus, user: event.user));
+
+    // Handle data migration for demo mode when an anonymous user
+    // becomes authenticated.
+    if (state.environment == local_config.AppEnvironment.demo &&
+        oldStatus == AppStatus.anonymous &&
+        newStatus == AppStatus.authenticated &&
+        oldUserId != null &&
+        event.user != null) {
+      print(
+        '[AppBloc] Detected anonymous to authenticated transition in DEMO mode. '
+        'Migrating data from $oldUserId to ${event.user!.id}.',
+      );
+      await _migrateAnonymousUserData(oldUserId, event.user!.id, emit);
+    }
 
     if (event.user != null) {
       // User is present (authenticated or anonymous)
@@ -416,6 +439,129 @@ class AppBloc extends Bloc<AppEvent, AppState> {
       print(
         '[AppBloc] User ${event.userId} AccountAction shown. Last shown timestamp updated locally to $now. Backend update pending.',
       );
+    }
+  }
+
+  /// Migrates user settings and content preferences from an anonymous user ID
+  /// to a newly authenticated user ID in demo mode.
+  Future<void> _migrateAnonymousUserData(
+    String oldUserId,
+    String newUserId,
+    Emitter<AppState> emit,
+  ) async {
+    try {
+      // 1. Retrieve anonymous user's AppSettings
+      UserAppSettings? anonymousAppSettings;
+      try {
+        anonymousAppSettings = await _userAppSettingsRepository.read(
+          id: oldUserId,
+          userId: oldUserId,
+        );
+        print(
+          '[AppBloc] Found anonymous AppSettings for $oldUserId. '
+          'Language: ${anonymousAppSettings.language}, '
+          'Theme: ${anonymousAppSettings.displaySettings.baseTheme}',
+        );
+      } on NotFoundException {
+        print('[AppBloc] No anonymous AppSettings found for $oldUserId.');
+      }
+
+      // 2. Retrieve anonymous user's ContentPreferences
+      UserContentPreferences? anonymousContentPreferences;
+      try {
+        anonymousContentPreferences =
+            await _userContentPreferencesRepository.read(
+          id: oldUserId,
+          userId: oldUserId,
+        );
+        print(
+          '[AppBloc] Found anonymous ContentPreferences for $oldUserId. '
+          'Saved Headlines: ${anonymousContentPreferences.savedHeadlines.length}, '
+          'Followed Categories: ${anonymousContentPreferences.followedCategories.length}',
+        );
+      } on NotFoundException {
+        print(
+          '[AppBloc] No anonymous ContentPreferences found for $oldUserId.',
+        );
+      }
+
+      // 3. Migrate AppSettings to new user ID
+      if (anonymousAppSettings != null) {
+        final newAppSettings = anonymousAppSettings.copyWith(id: newUserId);
+        try {
+          await _userAppSettingsRepository.update(
+            id: newUserId,
+            item: newAppSettings,
+            userId: newUserId,
+          );
+          print('[AppBloc] Migrated AppSettings to $newUserId.');
+        } on NotFoundException {
+          // If new user's settings don't exist, create them
+          await _userAppSettingsRepository.create(
+            item: newAppSettings,
+            userId: newUserId,
+          );
+          print('[AppBloc] Created and migrated AppSettings for $newUserId.');
+        }
+      }
+
+      // 4. Migrate ContentPreferences to new user ID
+      if (anonymousContentPreferences != null) {
+        final newContentPreferences =
+            anonymousContentPreferences.copyWith(id: newUserId);
+        try {
+          await _userContentPreferencesRepository.update(
+            id: newUserId,
+            item: newContentPreferences,
+            userId: newUserId,
+          );
+          print('[AppBloc] Migrated ContentPreferences to $newUserId.');
+        } on NotFoundException {
+          // If new user's preferences don't exist, create them
+          await _userContentPreferencesRepository.create(
+            item: newContentPreferences,
+            userId: newUserId,
+          );
+          print(
+            '[AppBloc] Created and migrated ContentPreferences for $newUserId.',
+          );
+        }
+      }
+
+      // 5. Clean up old anonymous data
+      try {
+        await _userAppSettingsRepository.delete(
+          id: oldUserId,
+          userId: oldUserId,
+        );
+        print('[AppBloc] Deleted old anonymous AppSettings for $oldUserId.');
+      } catch (e) {
+        print(
+          '[AppBloc] Failed to delete old anonymous AppSettings for $oldUserId: $e',
+        );
+      }
+      try {
+        await _userContentPreferencesRepository.delete(
+          id: oldUserId,
+          userId: oldUserId,
+        );
+        print(
+          '[AppBloc] Deleted old anonymous ContentPreferences for $oldUserId.',
+        );
+      } catch (e) {
+        print(
+          '[AppBloc] Failed to delete old anonymous ContentPreferences for $oldUserId: $e',
+        );
+      }
+    } on HtHttpException catch (e) {
+      print(
+        '[AppBloc] Migration failed due to HTTP error: ${e.runtimeType} - ${e.message}',
+      );
+      // Optionally emit a failure state or log more severely
+    } catch (e, s) {
+      print('[AppBloc] Unexpected error during migration: $e');
+      print('[AppBloc] Stacktrace: $s');
+      // Optionally emit a failure state or log more severely
     }
   }
 }

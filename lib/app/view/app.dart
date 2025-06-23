@@ -80,6 +80,8 @@ class App extends StatelessWidget {
               userAppSettingsRepository: context
                   .read<HtDataRepository<UserAppSettings>>(),
               appConfigRepository: context.read<HtDataRepository<AppConfig>>(),
+              userContentPreferencesRepository: context
+                  .read<HtDataRepository<UserContentPreferences>>(), // Added
               environment: _environment, // Pass environment
             ),
           ),
